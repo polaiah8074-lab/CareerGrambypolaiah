@@ -1707,9 +1707,14 @@ async function sbLoadUsers(){
 }
 
 async function sbSaveUser(user){
+  // Wait up to 3s for connection to be verified
+  for(let i=0;i<15;i++){
+    if(window._sbConnected||window._sbKeyValid===false) break;
+    await new Promise(r=>setTimeout(r,200));
+  }
   if(!window._sbKeyValid) return;
   try{
-    await sb.from('cg_users').upsert({
+    const {error}=await sb.from('cg_users').upsert({
       user_id:user.userId,password:user.password,name:user.name,
       email:user.email||'',account_type:user.accountType||'jobseeker',
       role:user.role||'',city:user.city||'',
@@ -1718,7 +1723,9 @@ async function sbSaveUser(user){
       experience:user.experience||'Fresher',online:user.online!==false,
       profile_pic:user.profilePic||'',is_admin:user.isAdmin||false
     },{onConflict:'user_id'});
-  }catch(e){}
+    if(error) console.error('sbSaveUser error:',error.message);
+    else console.log('✅ User synced to Supabase:',user.userId);
+  }catch(e){console.error('sbSaveUser exception:',e);}
 }
 
 // ── POSTS ──
@@ -1735,29 +1742,57 @@ async function sbLoadPosts(){
         isJob:p.is_job||false,likes:p.likes||0,shares:p.shares||0,
         views:p.views||0,
         accountType:p.account_type||'jobseeker',image:p.image||'',
-        time:_timeAgoCompat(p.created_at)
+        time:_timeAgoCompat(p.created_at),
+        // Preserve like state from Supabase
+        likedBy:Array.isArray(p.liked_by)?p.liked_by:[]
       }));
-      // FIX: merge instead of overwrite — local posts (not yet synced) preserve చేయి
+      // Merge: keep local-only posts (not yet synced), use Supabase for the rest
       const sbIds=new Set(sbPosts.map(p=>p.id));
       const localOnly=posts.filter(p=>!sbIds.has(p.id)&&!_deletedPostIds.has(p.id));
       posts=[...localOnly,...sbPosts];
+      // Rebuild postInteractions from likedBy arrays so likes show correctly
+      sbPosts.forEach(p=>{
+        if(!postInteractions[p.id]) postInteractions[p.id]={likes:[],comments:[]};
+        if(p.likedBy&&p.likedBy.length){
+          postInteractions[p.id].likes=p.likedBy;
+        }
+      });
       save.posts();
+      save.postint();
     }
-  }catch(e){}
+  }catch(e){console.error('sbLoadPosts error:',e);}
 }
 
 async function sbSavePost(post){
+  // Wait up to 3s for connection to be verified before giving up
+  for(let i=0;i<15;i++){
+    if(window._sbConnected||window._sbKeyValid===false) break;
+    await new Promise(r=>setTimeout(r,200));
+  }
   if(!window._sbKeyValid) return;
   try{
-    // FIX: base64 images Supabase కి పంపొద్దు (too large → silent fail)
-    // Image localStorage లో already save అయింది; Supabase లో cloud URL మాత్రమే store చేయి
-    const imageVal=(post.image&&!post.image.startsWith('data:'))?post.image:'';
-    await sb.from('cg_posts').upsert({
-      id:post.id,user_id:post.userId,content:post.content,
-      is_job:post.isJob||false,likes:post.likes||0,shares:post.shares||0,views:post.views||0,
-      account_type:post.accountType||'jobseeker',image:imageVal
+    // Don't send base64 images to Supabase (too large → silent fail)
+    const imageVal=(post.image&&!post.image.startsWith('data:')&&!post.image.startsWith('__local__'))?post.image:'';
+    const {error}=await sb.from('cg_posts').upsert({
+      id:post.id,
+      user_id:post.userId,
+      content:post.content,
+      is_job:post.isJob||false,
+      likes:post.likes||0,
+      shares:post.shares||0,
+      views:post.views||0,
+      account_type:post.accountType||'jobseeker',
+      image:imageVal,
+      liked_by:post.likedBy||[],
+      created_at:post.createdAt||new Date().toISOString()
     },{onConflict:'id'});
-  }catch(e){console.error('sbSavePost error:',e);}
+    if(error){
+      console.error('sbSavePost error:',error.message,error.code);
+      showToast('⚠️ Post saved locally only — sync failed: '+error.message,'error');
+    } else {
+      console.log('✅ Post synced to Supabase:',post.id);
+    }
+  }catch(e){console.error('sbSavePost exception:',e);}
 }
 
 async function sbDeletePost(postId){
@@ -2027,7 +2062,30 @@ async function loadAllFromSupabase(){
     sbLoadVideos(),
     sbLoadConnections()
   ]);
+  // One-time: push any local posts that aren't in Supabase yet
+  await syncLocalPostsToSupabase();
+  // One-time: push current user to Supabase if not there
+  if(ME) await sbSaveUser(ME);
   startRealtimeSync();
+}
+
+// Push local-only posts to Supabase (runs once on login)
+async function syncLocalPostsToSupabase(){
+  if(!window._sbKeyValid||!ME) return;
+  try{
+    // Get current Supabase post IDs
+    const {data}=await sb.from('cg_posts').select('id');
+    const sbIds=new Set((data||[]).map(p=>p.id));
+    // Find local posts not in Supabase
+    const toSync=posts.filter(p=>!sbIds.has(p.id));
+    if(toSync.length===0) return;
+    console.log(`Syncing ${toSync.length} local posts to Supabase...`);
+    for(const post of toSync){
+      await sbSavePost(post);
+    }
+    console.log('✅ Local posts synced to Supabase');
+    showToast(`✅ ${toSync.length} post(s) synced to cloud`,'success');
+  }catch(e){console.error('syncLocalPostsToSupabase error:',e);}
 }
 
 // Helper: time ago — defined once above in HELPERS section
@@ -2818,11 +2876,21 @@ document.addEventListener('click',e=>{
       if(ui.liked[pid]){
         delete ui.liked[pid];
         post.likes=Math.max(0,post.likes-1);
-        if(window._sbKeyValid) sb.from('cg_posts').update({likes:post.likes}).eq('id',pid).then(()=>{}).catch(()=>{});
+        // Remove from liked_by array in Supabase
+        if(window._sbKeyValid){
+          const likedBy=(post.likedBy||[]).filter(id=>id!==ME.userId);
+          post.likedBy=likedBy;
+          sb.from('cg_posts').update({likes:post.likes,liked_by:likedBy}).eq('id',pid).catch(()=>{});
+        }
       }
       else{
         ui.liked[pid]=true;post.likes=(post.likes||0)+1;
-        if(window._sbKeyValid) sb.from('cg_posts').update({likes:post.likes}).eq('id',pid).then(()=>{}).catch(()=>{});
+        // Add to liked_by array in Supabase
+        if(window._sbKeyValid){
+          const likedBy=[...new Set([...(post.likedBy||[]),ME.userId])];
+          post.likedBy=likedBy;
+          sb.from('cg_posts').update({likes:post.likes,liked_by:likedBy}).eq('id',pid).catch(()=>{});
+        }
         // Notification for post author
         if(post.userId&&post.userId!==ME.userId){
           const notifKey='cg_notifs_'+post.userId;
@@ -4619,27 +4687,25 @@ document.addEventListener('click',e=>{
   }
 });
 
-// ── AUTO-REFRESH FEED every 30s ──
-setInterval(()=>{
-  if(ME&&document.getElementById('home-screen')?.classList.contains('active')){
-    sbLoadPosts().then(()=>{renderFeed();});
-    // Merge fresh notifications
-    renderNotifications();
-  }
-},30000);
+// ── AUTO-REFRESH FEED every 45s (single timer — no duplicate) ──
+// Note: startAutoRefresh() in showApp handles the per-session timer.
+// This global interval is intentionally removed to avoid double-refresh.
 
 // =============================================
-// AUTO-REFRESH: Cross-device post sync every 60s
+// AUTO-REFRESH: Cross-device sync every 60s
 // =============================================
 let _autoRefreshTimer=null;
 function startAutoRefresh(){
   clearInterval(_autoRefreshTimer);
   _autoRefreshTimer=setInterval(async()=>{
     if(!ME||!window._sbKeyValid) return;
-    await sbLoadPosts();
+    // Silently sync in background — no page reload, no flicker
+    await Promise.all([sbLoadUsers(), sbLoadPosts()]);
+    rebuildUserMap();
     if(state.currentTab==='home') renderFeed();
     if(state.currentTab==='jobs') renderJobs();
-  },60000); // every 60 seconds
+    if(state.currentTab==='search') renderSearch('');
+  },60000); // every 60 seconds — silent background sync
 }
 
 // =============================================
