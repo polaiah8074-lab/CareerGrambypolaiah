@@ -3313,7 +3313,26 @@ function openReelViewer(reelId){
   // FIX BUG 1: Wire video player
   const vp=document.getElementById('rvVideoPlayer');
   const ph=document.getElementById('rvPlaceholder');
-  if(r.videoData){vp.src=r.videoData;vp.style.display='block';ph.style.display='none';vp.play().catch(()=>{});}
+  if(r.videoData && r.videoData.startsWith('http')){
+    // Cloud URL — works on all devices
+    vp.src=r.videoData;
+    vp.style.display='block';
+    ph.style.display='none';
+    vp.play().catch(()=>{});
+  } else if(r.videoData && (r.videoData.startsWith('blob:') || r.videoData.startsWith('data:'))){
+    // Local blob/base64 — only works on device where it was uploaded
+    vp.src=r.videoData;
+    vp.style.display='block';
+    ph.style.display='none';
+    vp.play().catch(()=>{});
+    showToast('⚠️ This video is only available on the device it was uploaded from','error');
+  } else {
+    // No video data — show placeholder with message
+    vp.style.display='none';
+    ph.style.display='flex';
+    document.getElementById('rvEmoji').textContent='📵';
+    showToast('⚠️ Video not available — was uploaded without cloud storage','error');
+  }
   else{vp.src='';vp.style.display='none';ph.style.display='flex';}
   // Restore like state for this reel
   if(ME){
@@ -3361,13 +3380,21 @@ document.addEventListener('click',e=>{
 // SUPABASE STORAGE HELPER
 // =============================================
 async function uploadFileToStorage(file, bucket, filePath){
+  // Wait for connection
+  for(let i=0;i<15;i++){
+    if(window._sbConnected||window._sbKeyValid===false) break;
+    await new Promise(r=>setTimeout(r,200));
+  }
   if(!window._sbKeyValid) return null;
   try{
     const {data,error}=await sb.storage.from(bucket).upload(filePath,file,{cacheControl:'3600',upsert:true});
-    if(error) return null;
+    if(error){
+      console.error(`Storage upload failed (bucket: ${bucket}):`,error.message);
+      return null;
+    }
     const {data:urlData}=sb.storage.from(bucket).getPublicUrl(filePath);
     return urlData?.publicUrl||null;
-  }catch(e){return null;}
+  }catch(e){console.error('uploadFileToStorage exception:',e);return null;}
 }
 
 // =============================================
