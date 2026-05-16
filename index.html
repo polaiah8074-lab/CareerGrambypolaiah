@@ -533,28 +533,51 @@ input[type="file"]{display:none;}
 // SUPABASE CLIENT INITIALIZATION
 // ============================================
 const SUPABASE_URL = 'https://pkcypbdggjjeqqcfchcs.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_AehaUv3d5GETe2U2PjgcLg_rOl8_5aX';
+// IMPORTANT: Replace with your real anon/public key from Supabase Dashboard → Settings → API
+// The key must start with "eyJ" (JWT format). "sb_publishable_" keys do NOT work for REST API.
+// You can also update this at runtime via Settings → Update Supabase Key without redeploying.
+const SUPABASE_KEY_DEFAULT = 'sb_publishable_AehaUv3d5GETe2U2PjgcLg_rOl8_5aX';
+
+// Allow runtime key override stored in localStorage (set via Settings UI)
+function _getActiveKey(){
+  return localStorage.getItem('cg_sb_key_override') || SUPABASE_KEY_DEFAULT;
+}
+const SUPABASE_KEY = _getActiveKey();
 
 // FIX DataCloneError: custom fetch wrapper prevents Headers object postMessage clash
 const _safeFetch = (...args) => fetch(...args);
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
   global: { fetch: _safeFetch },
-  auth: { persistSession: true, autoRefreshToken: false },
+  auth: { persistSession: false, autoRefreshToken: false },
   realtime: { timeout: 10000 }
 });
 
-// Validate key format first (sync), then verify with network (async)
+// Accept both eyJ (old JWT format) and sb_publishable_ (new Supabase format)
 window._sbKeyValid = SUPABASE_KEY.startsWith('eyJ') || SUPABASE_KEY.startsWith('sb_publishable_') || SUPABASE_KEY.startsWith('sb_');
+window._sbConnected = false; // true only after a successful network check
+
 // Async verify — update after network check
 (async () => {
+  if(!window._sbKeyValid){
+    console.warn('CareerGram: Supabase key format not recognized. Multi-device sync disabled.');
+    return;
+  }
   try {
-    const res = await fetch(SUPABASE_URL + '/rest/v1/cg_users?select=user_id&limit=1', {
-      headers: { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY }
-    });
-    // 401 = wrong key, 403 = RLS/CORS (key still valid — RLS needs to be configured in Supabase)
-    window._sbKeyValid = res.status !== 401;
-  } catch(e) { /* keep format-based value */ }
+    // Use Supabase JS client to test connection (works with both key formats)
+    const {data, error} = await sb.from('cg_users').select('user_id').limit(1);
+    if(error && (error.code === '42P01' || error.message?.includes('does not exist'))){
+      // Table doesn't exist yet — key is valid, just need to create tables
+      window._sbConnected = true;
+      console.log('CareerGram: Supabase connected ✅ (tables need setup)');
+    } else if(error && error.message?.includes('JWT')){
+      window._sbKeyValid = false;
+      console.warn('CareerGram: Supabase key rejected. Update key in Settings.');
+    } else {
+      window._sbConnected = true;
+      console.log('CareerGram: Supabase connected ✅');
+    }
+  } catch(e) { /* network error — will retry on login */ }
 })();
 </script>
 </head>
@@ -606,6 +629,11 @@ window._sbKeyValid = SUPABASE_KEY.startsWith('eyJ') || SUPABASE_KEY.startsWith('
     <!-- Login Card -->
     <div class="lcard" id="loginCard">
       <h2>Welcome Back</h2><p class="sub">Sign in to your account</p>
+      <!-- Sync status banner — shown/hidden by JS after key check -->
+      <div id="loginSyncBanner" style="display:none;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3);border-radius:10px;padding:10px 12px;margin-bottom:14px;font-size:12px;color:#fbbf24;line-height:1.6;">
+        ⚠️ <b>Multi-device sync is OFF</b> — accounts created on other devices won't appear here.<br/>
+        After login, go to <b>Settings → Update Supabase Key</b> to fix this.
+      </div>
       <label>User ID</label><input id="loginId" placeholder="Enter your user ID"/>
       <label>Password</label><input id="loginPw" type="password" placeholder="Password"/>
       <div class="err" id="loginErr">⚠️ Invalid credentials</div>
@@ -1211,6 +1239,18 @@ window._sbKeyValid = SUPABASE_KEY.startsWith('eyJ') || SUPABASE_KEY.startsWith('
     <div id="sbKeyWarning" style="display:none;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);border-radius:12px;padding:14px;margin-bottom:14px;"><div style="font-size:11px;color:#94a3b8;margin-top:8px;">⚠️ Also make sure Supabase RLS policies allow anon SELECT on all cg_ tables</div>
       <div style="color:#f59e0b;font-size:13px;font-weight:700;margin-bottom:8px;">⚠️ Supabase Key Invalid</div>
       <div style="color:#94a3b8;font-size:12px;line-height:1.7;">Multi-user sync పని చేయడం లేదు. Fix చేయడానికి:<br/>1. <a href="https://supabase.com" target="_blank" style="color:var(--accent2);">supabase.com</a> → నీ project open చేయి<br/>2. Settings → API → <b>anon public</b> key copy చేయి<br/>3. Code లో <code style="background:rgba(99,102,241,.2);padding:2px 6px;border-radius:4px;">SUPABASE_KEY</code> replace చేయి</div>
+    </div>
+
+    <!-- Supabase Key Update (no redeploy needed) -->
+    <div class="card prof-section" style="margin-bottom:14px;" id="sbKeyUpdateSection">
+      <h4>🔑 Update Supabase Key</h4>
+      <p style="color:var(--text2);font-size:12px;margin-bottom:10px;line-height:1.6;">Multi-device sync fix: Supabase Dashboard → Settings → API → copy the <b style="color:#fff;">anon public</b> key (starts with <code style="background:rgba(99,102,241,.2);padding:1px 5px;border-radius:4px;color:#c7d2fe;">eyJ</code>)</p>
+      <input id="sbKeyInput" type="text" placeholder="Paste eyJ... anon key here" style="width:100%;padding:10px 14px;border-radius:10px;border:1px solid rgba(99,102,241,.25);background:rgba(15,23,42,.6);color:#fff;font-size:13px;outline:none;margin-bottom:8px;font-family:monospace;"/>
+      <div style="display:flex;gap:8px;">
+        <button onclick="applySbKey()" style="flex:1;padding:10px;border-radius:10px;border:none;background:linear-gradient(135deg,#6366f1,#818cf8);color:#fff;font-weight:700;font-size:13px;cursor:pointer;">✅ Save & Reconnect</button>
+        <button onclick="clearSbKey()" style="padding:10px 14px;border-radius:10px;border:1px solid rgba(99,102,241,.3);background:transparent;color:var(--text2);font-size:13px;cursor:pointer;">Reset</button>
+      </div>
+      <div id="sbKeyStatus" style="margin-top:8px;font-size:12px;color:var(--text2);"></div>
     </div>
 
     <button class="logout-btn" onclick="logout()" style="width:100%;padding:12px;margin-bottom:20px;">🚪 Logout</button>
@@ -2104,6 +2144,37 @@ function logout(){
   document.getElementById('loginPw').value='';
 }
 
+// ── SUPABASE KEY MANAGEMENT (runtime update without redeploying) ──
+async function applySbKey(){
+  const input=document.getElementById('sbKeyInput');
+  const status=document.getElementById('sbKeyStatus');
+  const key=(input?.value||'').trim();
+  if(!key){status.textContent='⚠️ Please paste a key first.';status.style.color='#f87171';return;}
+  if(!key.startsWith('eyJ') && !key.startsWith('sb_publishable_') && !key.startsWith('sb_')){status.textContent='⚠️ Invalid key format. Should start with eyJ or sb_publishable_';status.style.color='#f87171';return;}
+  status.textContent='🔄 Testing connection...';status.style.color='#94a3b8';
+  try{
+    // Test using Supabase JS client (works with both eyJ and sb_publishable_ formats)
+    const testClient=supabase.createClient(SUPABASE_URL,key,{global:{fetch:_safeFetch},auth:{persistSession:false}});
+    const {error}=await testClient.from('cg_users').select('user_id').limit(1);
+    if(error&&error.message&&(error.message.includes('JWT')||error.message.includes('Invalid API key')||error.message.includes('apikey'))){
+      status.textContent='❌ Key rejected. Double-check you copied the correct key.';status.style.color='#f87171';return;
+    }
+    localStorage.setItem('cg_sb_key_override',key);
+    status.textContent='✅ Key saved! Reloading to apply...';status.style.color='#22c55e';
+    setTimeout(()=>location.reload(),1200);
+  }catch(e){
+    status.textContent='⚠️ Network error. Key saved — will try on next load.';status.style.color='#f59e0b';
+    localStorage.setItem('cg_sb_key_override',key);
+    setTimeout(()=>location.reload(),1500);
+  }
+}
+function clearSbKey(){
+  localStorage.removeItem('cg_sb_key_override');
+  const status=document.getElementById('sbKeyStatus');
+  if(status){status.textContent='Key reset. Reloading...';status.style.color='#94a3b8';}
+  setTimeout(()=>location.reload(),800);
+}
+
 // Sign In
 document.getElementById('signInBtn').addEventListener('click',async ()=>{
   const id=document.getElementById('loginId').value.trim();
@@ -2113,49 +2184,79 @@ document.getElementById('signInBtn').addEventListener('click',async ()=>{
   if(!id||!pw){err.classList.add('show');err.textContent='⚠️ Please enter User ID and Password.';return;}
   btn.textContent='Signing in...';btn.disabled=true;
 
-  // Wait up to 2s for Supabase validation to complete
-  for(let i=0;i<10;i++){
-    if(typeof window._sbKeyValid!=='undefined') break;
+  // Wait up to 3s for Supabase validation to complete
+  for(let i=0;i<15;i++){
+    if(typeof window._sbConnected!=='undefined'||!window._sbKeyValid) break;
     await new Promise(r=>setTimeout(r,200));
   }
 
-  // STEP 1: Try Supabase if connected
+  // STEP 1: Try Supabase if key is valid
   if(window._sbKeyValid){
     try{
-      const {data}=await sb.from('cg_users').select('*').eq('user_id',id).maybeSingle();
-      if(data&&data.password===pw){
-        const u={
-          id:data.id,userId:data.user_id,password:data.password,
-          name:data.name,email:data.email||'',
-          accountType:data.account_type||'jobseeker',
-          role:data.role||'',city:data.city||'',
-          avatar:data.avatar||data.name?.slice(0,2).toUpperCase()||'??',
-          color:data.color||'#6366f1',bio:data.bio||'',
-          skills:Array.isArray(data.skills)?data.skills:[],
-          company:data.company||'',experience:data.experience||'Fresher',
-          online:true,profilePic:data.profile_pic||''
-        };
-        const li=registeredUsers.findIndex(x=>x.userId===u.userId);
-        if(li>=0) registeredUsers[li]=u; else registeredUsers.unshift(u);
-        save.users();rebuildUserMap();
-        ME=u;localStorage.setItem('cg_session',JSON.stringify(ME));
+      const {data,error}=await sb.from('cg_users').select('*').eq('user_id',id).maybeSingle();
+      if(error){
+        // Supabase error (network/RLS) — fall through to local only if key is unverified
+        if(!window._sbConnected){
+          // Key not yet verified — allow local fallback
+        } else {
+          btn.textContent='Sign In';btn.disabled=false;
+          err.classList.add('show');err.textContent='⚠️ Server error. Please try again.';
+          return;
+        }
+      } else if(data){
+        // User found in Supabase
+        if(data.password===pw){
+          const u={
+            id:data.id,userId:data.user_id,password:data.password,
+            name:data.name,email:data.email||'',
+            accountType:data.account_type||'jobseeker',
+            role:data.role||'',city:data.city||'',
+            avatar:data.avatar||data.name?.slice(0,2).toUpperCase()||'??',
+            color:data.color||'#6366f1',bio:data.bio||'',
+            skills:Array.isArray(data.skills)?data.skills:[],
+            company:data.company||'',experience:data.experience||'Fresher',
+            online:true,profilePic:data.profile_pic||''
+          };
+          const li=registeredUsers.findIndex(x=>x.userId===u.userId);
+          if(li>=0) registeredUsers[li]=u; else registeredUsers.unshift(u);
+          save.users();rebuildUserMap();
+          ME=u;localStorage.setItem('cg_session',JSON.stringify(ME));
+          btn.textContent='Sign In';btn.disabled=false;
+          err.classList.remove('show');
+          showApp();
+          showToast('Welcome back, '+ME.name+'! 👋','success');
+          return;
+        } else {
+          // User exists but wrong password
+          btn.textContent='Sign In';btn.disabled=false;
+          err.classList.add('show');err.textContent='⚠️ Wrong password. Please try again.';
+          return;
+        }
+      } else if(window._sbConnected){
+        // Supabase is working but user not found there — don't silently fall back
+        // Check local as well (for accounts created before Supabase was connected)
+        const localUser=registeredUsers.find(u=>u.userId===id&&u.password===pw);
+        if(localUser){
+          // Found locally — sync to Supabase and log in
+          sbSaveUser(localUser);
+          ME=localUser;
+          localStorage.setItem('cg_session',JSON.stringify(ME));
+          btn.textContent='Sign In';btn.disabled=false;
+          err.classList.remove('show');
+          showApp();
+          showToast('Welcome back, '+ME.name+'! 👋','success');
+          return;
+        }
         btn.textContent='Sign In';btn.disabled=false;
-        err.classList.remove('show');
-        showApp();
-        showToast('Welcome back, '+ME.name+'! 👋','success');
-        return;
-      } else if(data&&data.password!==pw){
-        // User exists in Supabase but wrong password
-        btn.textContent='Sign In';btn.disabled=false;
-        err.classList.add('show');err.textContent='⚠️ Wrong password. Please try again.';
+        err.classList.add('show');err.textContent='⚠️ User not found. Check User ID & password, or create an account.';
         return;
       }
     }catch(e){
-      // Supabase error — fall through to local
+      // Network error — fall through to local
     }
   }
 
-  // STEP 2: Local check (works offline + test accounts)
+  // STEP 2: Local check (works offline or when Supabase key not yet configured)
   const user=registeredUsers.find(u=>u.userId===id&&u.password===pw);
   btn.textContent='Sign In';btn.disabled=false;
   if(user){
@@ -2164,9 +2265,16 @@ document.getElementById('signInBtn').addEventListener('click',async ()=>{
     err.classList.remove('show');
     showApp();
     showToast('Welcome back, '+ME.name+'! 👋','success');
+    if(!window._sbKeyValid){
+      setTimeout(()=>showToast('⚠️ Multi-device sync off. Go to Settings → Update Supabase Key to enable.','error'),2000);
+    }
   } else {
     err.classList.add('show');
-    err.textContent='⚠️ User not found. Check User ID & password, or create an account.';
+    if(!window._sbKeyValid){
+      err.textContent='⚠️ User not found locally. Multi-device sync is disabled — accounts from other devices are not visible. Go to Settings → Update Supabase Key.';
+    } else {
+      err.textContent='⚠️ User not found. Check User ID & password, or create an account.';
+    }
   }
 });
 document.getElementById('loginPw').addEventListener('keydown',e=>{if(e.key==='Enter') document.getElementById('signInBtn').click();});
@@ -4308,8 +4416,16 @@ function updateSettingsUI(){
   // Supabase key status
   const sbWarn=document.getElementById('sbKeyWarning');
   const sbStatus=document.getElementById('sbStatusText');
+  const hasOverride=!!localStorage.getItem('cg_sb_key_override');
   if(sbWarn) sbWarn.style.display=window._sbKeyValid?'none':'block';
-  if(sbStatus){sbStatus.textContent=window._sbKeyValid?'✅ Supabase Connected — Real-time sync ON':'⚠️ Running offline — local storage only';sbStatus.style.color=window._sbKeyValid?'var(--green)':'var(--red)';}
+  if(sbStatus){
+    if(window._sbConnected){sbStatus.textContent='✅ Supabase Connected — Multi-device sync ON';sbStatus.style.color='var(--green)';}
+    else if(window._sbKeyValid){sbStatus.textContent='🔄 Connecting to Supabase...';sbStatus.style.color='#f59e0b';}
+    else{sbStatus.textContent='❌ Key invalid — local only (accounts not shared across devices)';sbStatus.style.color='var(--red)';}
+  }
+  // Pre-fill key input if override exists
+  const sbKeyInput=document.getElementById('sbKeyInput');
+  if(sbKeyInput&&hasOverride) sbKeyInput.value=localStorage.getItem('cg_sb_key_override');
   if(document.getElementById('settingsUserId')) document.getElementById('settingsUserId').textContent=ME.userId;
   if(document.getElementById('settingsAccType')) document.getElementById('settingsAccType').textContent=ME.accountType;
   if(document.getElementById('settingsJoined')) document.getElementById('settingsJoined').textContent=ME.createdAt?new Date(ME.createdAt).toLocaleDateString():'Unknown';
@@ -4536,7 +4652,10 @@ document.addEventListener('DOMContentLoaded',async ()=>{
     if(typeof window._sbKeyValid !== 'undefined') break;
     await new Promise(r=>setTimeout(r,200));
   }
-  console.log('Supabase key valid:',window._sbKeyValid);
+  console.log('Supabase key valid:',window._sbKeyValid,'connected:',window._sbConnected);
+  // Show login sync warning banner if key is invalid
+  const loginBanner=document.getElementById('loginSyncBanner');
+  if(loginBanner) loginBanner.style.display=window._sbKeyValid?'none':'block';
   checkSession();
 });
 </script>
